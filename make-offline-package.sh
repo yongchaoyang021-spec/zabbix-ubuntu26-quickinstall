@@ -82,7 +82,9 @@ apt-get update -y
 # 2. Download the full stack + all dependencies (no installation)
 #------------------------------------------------------------------------------
 info "Downloading Zabbix stack and all dependencies (this may take a while)..."
-DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only \
+# --reinstall is critical: without it, apt skips packages that are already
+# installed on this build machine and the bundle would miss core components
+DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only --reinstall \
     -o Dir::Cache::archives="${DEBS_DIR}" \
     -o Dir::Cache::archives/partial="${DEBS_DIR}/partial" \
     zabbix-server-mysql zabbix-frontend-php "${WEB_PKG}" zabbix-sql-scripts "${AGENT_PKG}" mysql-server
