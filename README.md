@@ -4,6 +4,8 @@
 
 遵循 [Zabbix 官方安装文档](https://www.zabbix.com/download) 的标准流程，支持：
 
+![Zabbix 8.0 中文界面 - Global view](docs/images/global-view-zh.png)
+
 - 🌐 **外网在线安装**：直接从 `repo.zabbix.com` 官方源安装
 - 🏢 **内网离线安装**：先在有外网的机器上制作离线包，再拷贝到内网服务器安装
 - 🔒 生产环境加固项：随机强数据库密码、日志留痕、服务自检、防火墙放行
