@@ -41,6 +41,8 @@ OFFLINE_DIR=""
 CONFIG_FILE=""
 LOG_FILE="/var/log/zabbix-install.log"
 CRED_FILE="/root/.zabbix-db-password"
+DATA_DIR="/data"              # all persistent data lives here (DB datadir, backups)
+INNODB_BUFFER_POOL=""         # optional, e.g. "12G"; production tuning
 
 ZABBIX_PKGS_BASE="zabbix-server-mysql zabbix-frontend-php zabbix-sql-scripts"
 REPO_DEB_URL_FMT="https://repo.zabbix.com/zabbix/%s/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_%s+ubuntu%s_all.deb"
@@ -82,6 +84,11 @@ Options:
   --no-firewall            Do not touch firewall rules
   --offline <dir>          Offline install from a package directory/tarball
                            created by make-offline-package.sh
+  --data-dir <dir>         Root directory for persistent data (MySQL datadir is
+                           placed under <dir>/mysql, backups under <dir>/zabbix/backup).
+                           Default: ${DATA_DIR}
+  --innodb-buffer-pool <s> Set innodb_buffer_pool_size, e.g. "12G" (recommended:
+                           50-70% of RAM in production)
   --config <file>          Read options from a config file (see config.example.conf)
   --non-interactive        Never prompt; fail if a required option is missing
   -h, --help               Show this help
@@ -106,6 +113,8 @@ while [[ $# -gt 0 ]]; do
         --timezone)           TIMEZONE="$2"; shift 2 ;;
         --no-firewall)        OPEN_FIREWALL="no"; shift ;;
         --offline)            OFFLINE_DIR="$2"; shift 2 ;;
+        --data-dir)           DATA_DIR="$2"; shift 2 ;;
+        --innodb-buffer-pool) INNODB_BUFFER_POOL="$2"; shift 2 ;;
         --config)             CONFIG_FILE="$2"; shift 2 ;;
         --non-interactive)    NON_INTERACTIVE="yes"; shift ;;
         -h|--help)            usage; exit 0 ;;
@@ -164,6 +173,7 @@ check_preconditions() {
     info "  Web server     : ${WEBSERVER}"
     info "  Agent package  : ${AGENT_PKG}"
     info "  DB host        : ${DB_HOST}"
+    info "  Data dir       : ${DATA_DIR}"
     info "  Timezone       : ${TIMEZONE}"
     info "  Install mode   : $([[ -n "$OFFLINE_DIR" ]] && echo offline || echo online)"
     info "  Log file       : ${LOG_FILE}"
@@ -257,6 +267,98 @@ install_zabbix_packages() {
             info "Installing MySQL server..."
             DEBIAN_FRONTEND=noninteractive apt-get install -y mysql-server
         fi
+    fi
+}
+
+#------------------------------------------------------------------------------
+# Data directory: place MySQL datadir (and backup dir) under DATA_DIR
+#------------------------------------------------------------------------------
+setup_data_dir() {
+    step "Configuring data storage under ${DATA_DIR}"
+
+    mkdir -p "$DATA_DIR/zabbix/backup"
+    if ! mountpoint -q "$DATA_DIR" 2>/dev/null; then
+        warn "${DATA_DIR} is not a dedicated mount point — data would live on the OS disk."
+        if [[ "$NON_INTERACTIVE" != "yes" ]]; then
+            read -r -p "Continue anyway? [y/N] " ans
+            [[ "${ans,,}" == "y" ]] || die "Aborted by user."
+        fi
+    fi
+
+    local my_cnf="/etc/mysql/mysql.conf.d/mysqld.cnf"
+    if [[ ! -f "$my_cnf" ]]; then
+        my_cnf=$(find /etc/mysql -name '*.cnf' -path '*mysqld*' 2>/dev/null | sed -n '1p' || true)
+    fi
+    [[ -f "$my_cnf" ]] || die "MySQL server config file not found under /etc/mysql."
+
+    local current_datadir
+    current_datadir=$(mysql -NBe "SELECT @@datadir;" 2>/dev/null | tr -d '[:space:]')
+    current_datadir="${current_datadir:-/var/lib/mysql}"
+    current_datadir="${current_datadir%/}"
+    local target="$DATA_DIR/mysql"
+
+    if [[ "$current_datadir" == "$target" ]]; then
+        info "MySQL datadir already at ${target} — nothing to do."
+    else
+        info "Migrating MySQL datadir ${current_datadir} -> ${target} ..."
+        systemctl stop zabbix-server 2>/dev/null || true
+        systemctl stop mysql 2>/dev/null || systemctl stop mysqld 2>/dev/null \
+            || die "Failed to stop MySQL before datadir migration."
+
+        mkdir -p "$target"
+        cp -a "${current_datadir}/." "$target/"
+        chown -R mysql:mysql "$target"
+
+        # AppArmor (Ubuntu ships a profile for mysqld — allow the new path)
+        local aa_local="/etc/apparmor.d/local/usr.sbin.mysqld"
+        if [[ -f "$aa_local" ]] && ! grep -qF "$target" "$aa_local"; then
+            {
+                echo ""
+                echo "# Added by zabbix-ubuntu26-quickinstall: relocated datadir"
+                echo "${target}/ r,"
+                echo "${target}/** rwk,"
+            } >> "$aa_local"
+            systemctl restart apparmor 2>/dev/null || true
+        fi
+
+        # Point MySQL at the new datadir
+        if grep -qE '^[[:space:]]*datadir[[:space:]]*=' "$my_cnf"; then
+            sed -i -E "s@^[[:space:]]*datadir[[:space:]]*=.*@datadir = ${target}@" "$my_cnf"
+        else
+            sed -i "/\[mysqld\]/a datadir = ${target}" "$my_cnf"
+        fi
+
+        systemctl start mysql 2>/dev/null || systemctl start mysqld 2>/dev/null \
+            || die "MySQL failed to start after datadir migration. Check: journalctl -u mysql -e"
+
+        local i
+        for i in $(seq 1 60); do
+            mysqladmin --silent ping >/dev/null 2>&1 && break
+            [[ $i -eq 60 ]] && die "MySQL not ready within 60s after datadir migration."
+            sleep 1
+        done
+
+        local verify_dir
+        verify_dir=$(mysql -NBe "SELECT @@datadir;" 2>/dev/null | tr -d '[:space:]')
+        [[ "${verify_dir%/}" == "$target" ]] || die "Datadir migration failed: MySQL still reports ${verify_dir}"
+        info "MySQL datadir migrated to ${target}."
+    fi
+
+    # Optional production tuning
+    if [[ -n "$INNODB_BUFFER_POOL" ]]; then
+        if grep -qE '^[[:space:]]*innodb_buffer_pool_size[[:space:]]*=' "$my_cnf"; then
+            sed -i -E "s@^[[:space:]]*innodb_buffer_pool_size[[:space:]]*=.*@innodb_buffer_pool_size = ${INNODB_BUFFER_POOL}@" "$my_cnf"
+        else
+            sed -i "/\[mysqld\]/a innodb_buffer_pool_size = ${INNODB_BUFFER_POOL}" "$my_cnf"
+        fi
+        systemctl restart mysql 2>/dev/null || systemctl restart mysqld 2>/dev/null || true
+        local j
+        for j in $(seq 1 60); do
+            mysqladmin --silent ping >/dev/null 2>&1 && break
+            [[ $j -eq 60 ]] && die "MySQL not ready within 60s after buffer pool change."
+            sleep 1
+        done
+        info "innodb_buffer_pool_size set to ${INNODB_BUFFER_POOL}."
     fi
 }
 
@@ -489,8 +591,9 @@ print_summary() {
     2. Enable HTTPS (certbot or corporate certificate).
     3. Restrict access: only 80/443 public; keep 10051 for agents;
        10050 only inside your monitoring network.
-    4. Tune MySQL: innodb_buffer_pool_size = 50-70% of RAM.
-    5. Schedule daily backups of the 'zabbix' database and /etc/zabbix/.
+    4. Tune MySQL: innodb_buffer_pool_size = 50-70% of RAM (--innodb-buffer-pool).
+    5. Schedule daily backups of the 'zabbix' database into ${DATA_DIR}/zabbix/backup
+       and of the /etc/zabbix/ config directory.
 ==============================================================
 SUMMARY
 }
@@ -524,6 +627,9 @@ main() {
             [[ $i -eq 60 ]] && die "MySQL did not become ready within 60s. Check: journalctl -u mysql -e"
             sleep 1
         done
+
+        # Move MySQL datadir (and backups) under DATA_DIR
+        setup_data_dir
     fi
 
     setup_database

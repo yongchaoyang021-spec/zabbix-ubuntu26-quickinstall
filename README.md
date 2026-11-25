@@ -70,6 +70,8 @@ sudo bash install-zabbix.sh --no-firewall
 | `--agent` | — | 改装经典 zabbix-agent |
 | `--timezone <tz>` | `Asia/Shanghai` | 系统/PHP 时区 |
 | `--no-firewall` | — | 跳过防火墙配置 |
+| `--data-dir <dir>` | `/data` | 持久化数据根目录：MySQL 数据目录迁至 `<dir>/mysql`，备份目录 `<dir>/zabbix/backup` |
+| `--innodb-buffer-pool <s>` | — | 设置 innodb_buffer_pool_size（生产建议内存的 50–70%，如 `12G`） |
 | `--offline <dir\|tar.gz>` | — | 离线安装模式 |
 | `--config <file>` | — | 从配置文件读取参数 |
 | `--non-interactive` | — | 非交互模式（全部用参数/默认值） |
