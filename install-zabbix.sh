@@ -43,6 +43,9 @@ LOG_FILE="/var/log/zabbix-install.log"
 CRED_FILE="/root/.zabbix-db-password"
 DATA_DIR="/data"              # all persistent data lives here (DB datadir, backups)
 INNODB_BUFFER_POOL=""         # optional, e.g. "12G"; production tuning
+UI_LANG="zh_CN"               # system locale to generate for the frontend UI
+                              # (greyed-out languages in user settings = missing locale);
+                              # set to "" to skip
 
 ZABBIX_PKGS_BASE="zabbix-server-mysql zabbix-frontend-php zabbix-sql-scripts"
 REPO_DEB_URL_FMT="https://repo.zabbix.com/zabbix/%s/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_%s+ubuntu%s_all.deb"
@@ -476,6 +479,32 @@ configure_timezone() {
 }
 
 #------------------------------------------------------------------------------
+# System locales: languages greyed out in the frontend = missing locale
+#------------------------------------------------------------------------------
+configure_ui_locale() {
+    [[ -n "$UI_LANG" ]] || { info "UI locale generation skipped."; return 0; }
+    step "Generating system locale for UI language: ${UI_LANG}"
+
+    local enc="${UI_LANG}.UTF-8"
+    command -v locale-gen >/dev/null 2>&1 || apt-get install -y locales
+
+    if locale -a 2>/dev/null | grep -qi "^${UI_LANG}.utf8\|^${UI_LANG}\$"; then
+        info "Locale ${enc} already present."
+        return 0
+    fi
+
+    if grep -q "^# ${UI_LANG}.UTF-8 UTF-8" /etc/locale.gen; then
+        sed -i "s/^# ${UI_LANG}.UTF-8 UTF-8/${UI_LANG}.UTF-8 UTF-8/" /etc/locale.gen
+    elif ! grep -q "^${UI_LANG}.UTF-8 UTF-8" /etc/locale.gen; then
+        echo "${UI_LANG}.UTF-8 UTF-8" >> /etc/locale.gen
+    fi
+    locale-gen >/dev/null
+    locale -a 2>/dev/null | grep -qi "${UI_LANG}" \
+        && info "Locale ${enc} generated — it can now be selected in User settings." \
+        || warn "Locale ${enc} generation could not be verified."
+}
+
+#------------------------------------------------------------------------------
 # Web server: enable modules / config
 #------------------------------------------------------------------------------
 configure_webserver() {
@@ -635,6 +664,7 @@ main() {
     setup_database
     configure_zabbix_server
     configure_timezone
+    configure_ui_locale
     configure_webserver
     start_services
     configure_firewall
