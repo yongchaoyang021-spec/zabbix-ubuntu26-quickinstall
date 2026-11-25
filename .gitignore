@@ -1,0 +1,13 @@
+# OS artifacts
+.DS_Store
+Thumbs.db
+
+# Editor files
+*.swp
+*~
+.idea/
+.vscode/
+
+# Local test/deploy files that must not be committed
+my.conf
+*.log
