@@ -84,6 +84,8 @@ sudo bash install-zabbix.sh --no-firewall
 
 ## 内网离线部署
 
+适用场景：目标服务器**无法访问任何外网源**（既不通 `repo.zabbix.com`，也不通 Ubuntu 归档源）。
+
 ### 第 1 步：在有外网的 Ubuntu 26.04 机器上制作离线包
 
 ```bash
@@ -95,6 +97,18 @@ sudo bash make-offline-package.sh
 
 > 注意：制作机的 **系统版本（26.04）和架构（amd64/arm64）必须与目标内网服务器一致**。
 
+**制作完成后请务必确认包的完整性**（这是踩过的坑）：
+
+```bash
+f=zabbix-offline-8.0-ubuntu26.04-amd64-20260101.tar.gz
+tar tzf $f | grep -c '\.deb$'                 # 正常应 ≥ 200 个（约 142MB）
+tar tzf $f | grep -E 'mysql-server-core|mysql-server_|php8.5-fpm'   # 三个都必须在
+```
+
+> v1.0.0 及更早版本制作的离线包**只有 7 个 deb**（缺 `mysql-server-core` 等依赖），
+> 在内网机上会装出「没有 `mysqld`、没有 `mysql.service`」的残缺 MySQL。
+> 请使用 **v1.0.1 或更新版本**的 `make-offline-package.sh` 重新制作。
+
 ### 第 2 步：拷贝到内网服务器并安装
 
 ```bash
@@ -102,6 +116,22 @@ sudo bash make-offline-package.sh
 sha256sum -c zabbix-offline-8.0-ubuntu26.04-amd64-xxx.tar.gz.sha256   # 校验
 sudo bash install-zabbix.sh --offline zabbix-offline-8.0-ubuntu26.04-amd64-xxx.tar.gz
 ```
+
+脚本会用 `dpkg -i` 一次性安装包内全部组件，随后自动建库、导数据、迁移数据目录到 `/data`、
+启动服务并自检。全程日志在 `/var/log/zabbix-install.log`。
+
+### 第 3 步：Web 初始化
+
+浏览器访问 `http://<内网服务器IP>/zabbix`：
+
+| 字段 | 填什么 |
+|---|---|
+| Database host / port | `localhost` / `0`（本机 socket，不改） |
+| Database name / User | `zabbix` / `zabbix`（不改） |
+| **Password** | 服务器上 `cat /root/.zabbix-db-password` 里的 `DBPassword` |
+| **Default time zone**（下一页） | **手动选 `Asia/Shanghai`**，不要用默认的 `System: UTC` |
+
+完成后用 `Admin / zabbix` 登录，**立即改密码**，并在 *User settings → Language* 切换到简体中文。
 
 ---
 
@@ -128,7 +158,8 @@ sudo bash install-zabbix.sh --config my.conf --non-interactive
 ## 系统要求
 
 - Ubuntu 26.04 (Resolute)，amd64 / arm64
-- 建议 ≥ 4 vCPU / 8 GB RAM / SSD
+- 建议 ≥ 4 vCPU / 8 GB RAM / SSD，系统盘 ≥ 40 GB
+- 离线包约 142 MB（259 个 deb）；建议把 `/data` 放在独立数据盘
 - 外网模式需要能访问 `repo.zabbix.com` 和 Ubuntu 官方源
 
 ## 常见问题
@@ -150,12 +181,68 @@ sudo bash install-zabbix.sh --config my.conf --non-interactive
 </details>
 
 <details>
+<summary>离线安装报 <code>Unit mysql.service not found</code> / <code>Failed to start the MySQL service</code>？</summary>
+
+**原因**：离线包不完整，缺 `mysql-server-core`（`mysqld` 二进制所在包）。表现为
+`/usr/sbin/mysqld` 不存在、`/var/lib/mysql` 不存在、`systemctl cat mysql` 找不到单元文件。
+
+先用两条命令确认：
+
+```bash
+ls -l /usr/sbin/mysqld; systemctl cat mysql >/dev/null 2>&1 && echo "单元存在"
+dpkg -l | grep -E '^i[^i]|mysql-server-core'
+```
+
+**修复（二选一）**：
+
+1. 内网机**有可用的 apt 源**时，直接补齐再重跑：
+
+   ```bash
+   apt-get install -y --reinstall mysql-server-core mysql-server
+   systemctl start mysql && echo OK
+   sudo bash install-zabbix.sh --offline <原离线包.tar.gz>   # 可重入，直接重跑
+   ```
+
+2. 彻底解决：用 **v1.0.1+** 的 `make-offline-package.sh` 重新制作离线包（内含完整依赖闭包），
+   拷过去重跑安装脚本。
+</details>
+
+<details>
+<summary>zabbix-agent2 启动失败（Server 正常）？</summary>
+
+不影响监控平台本身运行，只影响本机自监控。排查顺序：
+
+```bash
+journalctl -u zabbix-agent2 -n 30 --no-pager   # 先看真实报错
+ss -tlnp | grep 10050                          # 端口是否被占用
+zabbix_agent2 -T 2>&1 | tail -20               # 配置自检
+```
+
+常见原因是 10050 端口冲突或配置项非法；修正后 `systemctl restart zabbix-agent2` 即可。
+</details>
+
+<details>
 <summary>想装 7.0 LTS / 7.4？</summary>
 
 ```bash
 sudo bash install-zabbix.sh --version 7.0
 ```
 </details>
+
+## 变更记录
+
+### v1.0.1（2026-11-26）
+
+- **修复：离线包不完整**（严重）。`make-offline-package.sh` 原先用 `apt-get --reinstall` 只重新下载
+  显式列出的包，其依赖因制作机上已安装而被 apt 跳过，导致离线包只有 7 个 deb，内网机上 MySQL
+  装出残缺状态（无 `mysqld`、无 `mysql.service`）。现改为 `-o Dir::State::status=<空文件>` 把制作机
+  视为裸机，下载**完整依赖闭包**（约 259 个 deb / 142 MB），并增加 `mysql-server-core` 存在性断言。
+- 文档补充：离线包完整性校验方法、离线安装失败排查、Web 初始化逐字段说明。
+
+### v1.0.0（2026-11-25）
+
+- 首个版本：Zabbix 8.0 LTS + MySQL 8 + Apache/Nginx + Agent2 一键部署，在线/离线双模式，
+  `--data-dir` 统一持久化目录，自动生成 locale 支持中文界面，通过真实服务器端到端实测。
 
 ## License
 
