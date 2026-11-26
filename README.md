@@ -135,6 +135,42 @@ sudo bash install-zabbix.sh --offline zabbix-offline-8.0-ubuntu26.04-amd64-xxx.t
 
 ---
 
+## 添加一台 Linux 被监控主机
+
+在**被监控的机器**上安装 agent2（Ubuntu 示例，其它发行版把源地址换成对应版本）：
+
+```bash
+# 1. 加 Zabbix 官方源（8.0 / 本机发行版）
+wget https://repo.zabbix.com/zabbix/8.0/release/ubuntu/pool/main/z/zabbix-release/zabbix-release_latest_8.0+ubuntu26.04_all.deb
+dpkg -i zabbix-release_latest_8.0+ubuntu26.04_all.deb && apt-get update
+apt-get install -y zabbix-agent2
+
+# 2. 指向 Zabbix Server（替换成你的 Server IP 和本机名）
+CONF=/etc/zabbix/zabbix_agent2.conf
+sed -i -E "s|^[#[:space:]]*Server=.*|Server=<SERVER_IP>|"            $CONF
+sed -i -E "s|^[#[:space:]]*ServerActive=.*|ServerActive=<SERVER_IP>|" $CONF
+sed -i -E "s|^[#[:space:]]*Hostname=.*|Hostname=$(hostname)|"        $CONF
+
+# 3. 启动并自检
+systemctl enable --now zabbix-agent2
+zabbix_agent2 -T          # 输出 Validation successful
+```
+
+在 **Zabbix Server 侧**验证被动采集：
+
+```bash
+zabbix_get -s <被监控机IP> -p 10050 -k agent.ping     # 返回 1 即通
+```
+
+最后在前端 **数据采集 → 主机 → 创建主机**：主机名与被监控机 `Hostname` 保持一致，
+接口填 `IP:10050`，模板选 **Linux by Zabbix agent**。
+
+> 同机已运行旧版 Agent（如 Zabbix 3.x）时，10050 会被占用：让新 agent2 用别的端口
+> （`ListenPort=10060`），并把主机接口端口一并改掉，两套监控可并存互不影响。
+> 注意 agent2 只兼容 Zabbix Server 4.0+，不能指向 3.x 服务端。
+
+---
+
 ## 非交互 / 批量部署
 
 ```bash
@@ -219,6 +255,27 @@ zabbix_agent2 -T 2>&1 | tail -20               # 配置自检
 ```
 
 常见原因是 10050 端口冲突或配置项非法；修正后 `systemctl restart zabbix-agent2` 即可。
+</details>
+
+<details>
+<summary>API 调用返回 <code>Not authorized.</code>（token 明明是对的）？</summary>
+
+Apache 默认不会把 `Authorization` 请求头传给 PHP-FPM，导致 Bearer token 到不了 Zabbix 前端。
+**v1.0.1+ 的安装脚本已自动修复**（在 `/etc/zabbix/apache.conf` 追加 `SetEnvIfNoCase ^Authorization$ ... HTTP_AUTHORIZATION`），
+如果你用的是旧版本或手工部署，补一条即可：
+
+```bash
+cat >> /etc/zabbix/apache.conf <<'EOF'
+
+<IfModule setenvif_module>
+    SetEnvIfNoCase ^Authorization$ "(.+)" HTTP_AUTHORIZATION=$1
+</IfModule>
+EOF
+apache2ctl configtest && systemctl reload apache2
+```
+
+验证：`curl -s -H "Authorization: Bearer x" http://localhost/zabbix/api_jsonrpc.php -d '{"jsonrpc":"2.0","method":"apiinfo.version","id":1}'`
+应返回版本号而不是 `Not authorized.`。
 </details>
 
 <details>

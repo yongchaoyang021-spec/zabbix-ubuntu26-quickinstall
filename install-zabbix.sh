@@ -512,6 +512,20 @@ configure_webserver() {
 
     if [[ "$WEBSERVER" == "apache" ]]; then
         a2enmod proxy proxy_fcgi >/dev/null
+        # Apache strips the Authorization header before it reaches PHP-FPM,
+        # which breaks Zabbix API Bearer-token authentication ("Not authorized.").
+        # Re-expose it as HTTP_AUTHORIZATION for the FastCGI handler.
+        local apache_conf="/etc/zabbix/apache.conf"
+        if [[ -f "$apache_conf" ]] && ! grep -q "HTTP_AUTHORIZATION" "$apache_conf"; then
+            cat >> "$apache_conf" <<'EOF'
+
+# Pass Authorization header to PHP-FPM so Zabbix API token/Bearer auth works
+<IfModule setenvif_module>
+    SetEnvIfNoCase ^Authorization$ "(.+)" HTTP_AUTHORIZATION=$1
+</IfModule>
+EOF
+            info "Enabled Authorization header passthrough for the Zabbix API."
+        fi
     else
         # zabbix-nginx-conf ships /etc/zabbix/nginx.conf
         [[ -f /etc/zabbix/nginx.conf ]] && {
