@@ -81,13 +81,21 @@ apt-get update -y
 #------------------------------------------------------------------------------
 # 2. Download the full stack + all dependencies (no installation)
 #------------------------------------------------------------------------------
-info "Downloading Zabbix stack and all dependencies (this may take a while)..."
-# --reinstall is critical: without it, apt skips packages that are already
-# installed on this build machine and the bundle would miss core components
-DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only --reinstall \
+info "Downloading Zabbix stack and its FULL dependency closure (this may take a while)..."
+# Trick: point Dir::State::status at an EMPTY file so apt treats this build
+# machine as a bare system. Otherwise apt silently skips every dependency
+# already installed here, and the bundle ends up incomplete (e.g. missing
+# mysql-server-core). Apt's resolver still picks correct alternatives.
+: > "${WORK_DIR}/empty-status"
+DEBIAN_FRONTEND=noninteractive apt-get install -y --download-only \
+    -o Dir::State::status="${WORK_DIR}/empty-status" \
     -o Dir::Cache::archives="${DEBS_DIR}" \
     -o Dir::Cache::archives/partial="${DEBS_DIR}/partial" \
     zabbix-server-mysql zabbix-frontend-php "${WEB_PKG}" zabbix-sql-scripts "${AGENT_PKG}" mysql-server
+
+# Sanity check: the bundle must contain the real server binaries package
+ls "$DEBS_DIR" | grep -q '^mysql-server-core' || \
+    die "Bundle is missing mysql-server-core — the dependency closure failed."
 
 # The release package may be skipped by --download-only if already installed;
 # we already downloaded it explicitly, so move it into the bundle.
